@@ -1,0 +1,123 @@
+#include "stm32f4xx_hal.h"
+#include "dht22.h"
+#include "lidar_lite_v3.h"
+#include "hc_sr04.h"
+#include "nrf24l01.h"
+#include "math.h"
+#include "arm_math.h" // Используем библиотеку CMSIS для работы с числами с плавающей точкой
+
+// Переменные для хранения данных
+float temperature = 0.0f;
+float humidity = 0.0f;
+float speed_of_sound = 0.0f;
+float time_delay_1 = 0.0f;
+float time_delay_2 = 0.0f;
+float distance_1 = 0.0f;
+float distance_2 = 0.0f;
+float height = 0.0f;
+float x = 0.0f, y = 0.0f, z = 0.0f;
+
+// Координаты маяков
+const float x1 = 0.0f, y1 = 0.0f;  // Координаты первого маяка
+const float x2 = 10.0f, y2 = 0.0f; // Координаты второго маяка
+
+// Коэффициенты фильтрации (например, экспоненциальное сглаживание)
+#define ALPHA 0.8f
+
+// Функция для фильтрации данных (экспоненциальное сглаживание)
+float FilterData(float newValue, float oldValue) {
+    return ALPHA * newValue + (1.0f - ALPHA) * oldValue;
+}
+
+// Инициализация системы
+void System_Init(void) {
+    HAL_Init();
+    // Инициализация периферии: таймеров, GPIO, SPI, UART и других
+    DHT22_Init();
+    LIDAR_Lite_Init();
+    HC_SR04_Init();
+    NRF24L01_Init();
+}
+
+// Функция для расчета скорости звука
+float CalculateSpeedOfSound(float temp, float hum) {
+    return (331.3f + 0.6f * temp) * (1.0f + 0.0124f * hum / 100.0f);
+}
+
+// Функция для расчета расстояния на основе времени задержки
+float CalculateDistance(float time_delay, float speed_of_sound) {
+    return time_delay * speed_of_sound;
+}
+
+// Функция для расчета координат методом триангуляции
+void CalculateCoordinates(float d1, float d2, float height, float* x, float* y, float* z) {
+    // Решаем систему уравнений триангуляции
+    float A = 2.0f * (x2 - x1);
+    float B = 2.0f * (y2 - y1);
+    float C = d1*d1 - d2*d2 + x2*x2 - x1*x1 + y2*y2 - y1*y1;
+
+    // Используем библиотеку ARM для вычисления квадратного корня
+    arm_sqrt_f32(fabsf((d1*d1) - (*x - x1) * (*x - x1)), y);
+
+    *x = C / A;
+    *z = height;
+}
+
+// Функция обработки ошибок
+void Error_Handler(void) {
+    // Обработка ошибок
+    while (1) {
+        // Можно мигать светодиодом или отправлять сообщения по UART
+    }
+}
+
+// Основной цикл
+int main(void) {
+    System_Init();
+
+    while (1) {
+        // Сбор данных с датчиков температуры и влажности
+        temperature = DHT22_ReadTemperature();
+        humidity = DHT22_ReadHumidity();
+
+        // Проверка данных на валидность
+        if (temperature == -1.0f || humidity == -1.0f) {
+            Error_Handler(); // Если данные невалидны, вызов обработчика ошибок
+        }
+
+        // Фильтрация данных температуры и влажности
+        temperature = FilterData(temperature, temperature);
+        humidity = FilterData(humidity, humidity);
+
+        // Расчет скорости звука с учетом температуры и влажности
+        speed_of_sound = CalculateSpeedOfSound(temperature, humidity);
+
+        // Сбор данных с ультразвуковых датчиков
+        time_delay_1 = HC_SR04_GetTimeDelay(1);  // Получаем время задержки от первого маяка
+        time_delay_2 = HC_SR04_GetTimeDelay(2);  // Получаем время задержки от второго маяка
+
+        // Фильтрация данных времени задержки
+        time_delay_1 = FilterData(time_delay_1, time_delay_1);
+        time_delay_2 = FilterData(time_delay_2, time_delay_2);
+
+        // Расчет расстояний до маяков
+        distance_1 = CalculateDistance(time_delay_1, speed_of_sound);
+        distance_2 = CalculateDistance(time_delay_2, speed_of_sound);
+
+        // Сбор данных с лазерного дальномера
+        height = LIDAR_Lite_GetHeight();
+        height = FilterData(height, height);
+
+        // Расчет координат дирижабля
+        CalculateCoordinates(distance_1, distance_2, height, &x, &y, &z);
+
+        // Передача данных на наземную станцию через NRF24L01
+        NRF24L01_TransmitData(x, y, z);
+
+        // Установка микроконтроллера в режим низкого энергопотребления между измерениями
+        HAL_PWR_EnterSLEEPMode(PWR_MAINREGULATOR_ON, PWR_SLEEPENTRY_WFI);
+
+        // Задержка перед следующим измерением (например, 100 мс)
+        HAL_Delay(100);
+    }
+}
